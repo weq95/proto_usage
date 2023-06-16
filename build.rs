@@ -5,7 +5,14 @@ fn main() -> Result<()> {
         .build_server(true)
         .build_client(true)
         .out_dir("protos")
-        .compile(&["protos/voting.proto", "protos/hello.proto"], &["protos"])?;
+        .compile(
+            &[
+                "protos/voting.proto",
+                "protos/hello.proto",
+                "protos/web.proto",
+            ],
+            &["protos"],
+        )?;
 
     Ok(())
 }

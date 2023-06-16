@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package web;
+
+message WebRequest {
+    int64 id = 1;
+    string name = 2;
+    string age = 3;
+    string id_card = 4;
+}
+
+message WebResponse {
+    int32 code = 1;
+    string message = 2;
+}
+
+service Web {
+    rpc UnaryWeb (WebRequest) returns (WebResponse);
+    rpc ServerSteamingWeb (WebRequest) returns (stream WebResponse);
+    rpc ClientStreamingWeb (stream WebRequest) returns (WebResponse);
+    rpc BidirectionalStreaming (stream WebRequest) returns (WebResponse);
+}

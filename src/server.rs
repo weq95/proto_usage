@@ -17,6 +17,10 @@ pub mod greet {
     include!("../protos/hello.rs");
 }
 
+pub mod web {
+    include!("../protos/web.rs");
+}
+
 #[derive(Debug, Default)]
 pub struct VotingService;
 

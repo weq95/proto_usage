@@ -1,5 +1,3 @@
-use std::io::stdin;
-
 use tonic::transport::{Channel, Endpoint};
 
 use greet::{greeter_client::GreeterClient, HelloReq};
@@ -11,6 +9,10 @@ pub mod voting {
 
 pub mod greet {
     include!("../protos/hello.rs");
+}
+
+pub mod web {
+    include!("../protos/web.rs");
 }
 
 type ThisErr = Box<dyn std::error::Error>;
