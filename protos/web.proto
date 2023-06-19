@@ -18,5 +18,5 @@ service Web {
     rpc UnaryWeb (WebRequest) returns (WebResponse);
     rpc ServerSteamingWeb (WebRequest) returns (stream WebResponse);
     rpc ClientStreamingWeb (stream WebRequest) returns (WebResponse);
-    rpc BidirectionalStreaming (stream WebRequest) returns (WebResponse);
+    rpc BidirectionalStreaming (stream WebRequest) returns (stream WebResponse);
 }
