@@ -10,6 +10,7 @@ fn main() -> Result<()> {
                 "protos/voting.proto",
                 "protos/hello.proto",
                 "protos/web.proto",
+                "protos/tutorial.proto",
             ],
             &["protos"],
         )?;
