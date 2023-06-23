@@ -15,5 +15,6 @@ fn main() -> Result<()> {
             &["protos"],
         )?;
 
+    println!("cargo:rerun-if-changed=src/");
     Ok(())
 }
