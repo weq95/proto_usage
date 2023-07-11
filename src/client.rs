@@ -1,14 +1,14 @@
 use std::{error::Error, time::Duration};
 
-use rand::{Rng, rngs::ThreadRng};
+use rand::{rngs::ThreadRng, Rng};
 use tokio::time;
 use tonic::{
-    Request,
     transport::{Channel, Endpoint},
+    Request,
 };
 
 use greet::{greeter_client::GreeterClient, HelloReq};
-use routeguide::{Point, Rectangle, route_guide_client::RouteGuideClient, RouteNote};
+use routeguide::{route_guide_client::RouteGuideClient, Point, Rectangle, RouteNote};
 use voting::{voting_client::VotingClient, voting_request, VotingRequest};
 
 pub mod voting {
@@ -173,7 +173,6 @@ async fn main() -> Result<(), ThisErr> {
             println!("greet error: {}", e);
         }
     });
-
 
     // tokio::try_join!(_task_greet, _task_voting);
 
