@@ -1,0 +1,109 @@
+use std::collections::HashMap;
+use serde::__private::de::IdentifierDeserializer;
+
+use crate::{CallbackBack, ReadWrite};
+
+#[derive(Debug)]
+pub struct User {
+    pub id: u64,
+    pub name: String,
+    pub age: u8,
+}
+
+impl User {
+    pub fn new(id: u64, name: &str, age: u8) -> Self {
+        Self {
+            id,
+            name: name.to_owned(),
+            age,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Table;
+
+impl Table {
+    pub fn new() -> Self {
+        Table
+    }
+}
+
+pub enum WsRsFn<T = Vec<u8>, U = T> where T: From<U> {
+    Func1(Box<dyn Fn(U)>),
+    Func2(Box<dyn Fn(Box<User>, T)>),
+    Func3(Box<dyn Fn(Box<User>, Box<Table>, T)>),
+    Func4(Box<dyn Fn(Box<User>, T, Box<dyn Fn(u32, Vec<u8>)>)>),
+}
+
+pub struct WsRouter {
+    actions: HashMap<u32, WsRsFn>,
+}
+
+impl WsRouter {
+    pub fn new() -> Self {
+        WsRouter {
+            actions: HashMap::new(),
+        }
+    }
+}
+
+impl CallbackBack<(u64, u32, Vec<u8>)> for WsRouter {
+    type CallbackType = WsRsFn;
+
+    fn name(&self) -> &str {
+        "ws-router"
+    }
+
+    fn init(&mut self) {
+        self.actions.insert(1000, WsRsFn::Func1(Box::new(demo001)));
+        self.actions.insert(1001, WsRsFn::Func2(Box::new(demo002)));
+        self.actions.insert(1002, WsRsFn::Func3(Box::new(demo003)));
+        self.actions.insert(1003, WsRsFn::Func4(Box::new(demo004)));
+    }
+
+    fn callback(&self, args: (u64, u32, Vec<u8>)) {
+        if let Some(function) = self.actions.get(&args.1) {
+            let user = Box::new(User::new(args.0, "test1", 27));
+            match function {
+                WsRsFn::Func1(func) => func(args.2.into()),
+                WsRsFn::Func2(func) => func(user, args.2.into()),
+                WsRsFn::Func3(func) => func(user, Box::new(Table::new()), args.2.into()),
+                WsRsFn::Func4(func) => func(user, args.2.into(), Box::new(|id: u32, data: Vec<u8>| {}))
+            }
+
+            return;
+        }
+
+        eprintln!("{} 协议号不存在: ({})", self.name(), args.0);
+    }
+}
+
+impl ReadWrite<(u64, u32, Vec<u8>)> for WsRouter {
+    fn read(&mut self) -> std::io::Result<()> {
+        todo!()
+    }
+
+    fn write(&self, protocol: usize, data: &[u8]) -> std::io::Result<()> {
+        todo!()
+    }
+}
+
+
+#[derive(Debug)]
+pub struct ReqUser {
+    pub id: u32,
+    pub name: String,
+    pub age: u8,
+    pub hobby: Vec<String>,
+}
+
+fn demo001(data: ReqUser) { println!("req: {:?}", data); }
+
+fn demo002(user: Box<User>, data: Vec<u8>) { todo!() }
+
+fn demo003(user: Box<User>, table: Box<Table>, data: Vec<u8>) { todo!() }
+
+fn demo004(user: Box<User>, data: Vec<u8>, func: Box<dyn Fn(u32, Vec<u8>)>) {
+    func(user.id as u32, data)
+}
