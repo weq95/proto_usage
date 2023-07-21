@@ -1,94 +1,70 @@
-use std::{
-    io::{Error, ErrorKind, Result},
-    net::{Ipv4Addr, Ipv6Addr},
-};
-use std::fmt::Debug;
-use std::sync::Arc;
-use std::time::Duration;
+use std::io::{Error, Result};
+use std::sync::{Arc, Mutex};
 
+use regex::Regex;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::Mutex,
-    time::timeout,
+    time::{Duration, timeout},
 };
 
-mod tcp_router;
-mod ws_router;
+use crate::manager::mgr::{EnumRouter, InitRouter, Reader};
 
-pub trait CallbackBack<Args = (usize, Vec<u8>)> {
-    type CallbackType;
-
-    fn name(&self) -> &str;
-    fn init(&mut self);
-    fn header_len(&self) -> usize {
-        6
-    }
-    fn protocol_len(&self) -> usize {
-        2
-    }
-    fn callback(&self, args: Args);
-}
-
-pub trait ReadWrite<Args = (usize, Vec<u8>)>: CallbackBack<Args> {
-    fn read(&mut self) -> Result<()>;
-    fn write(&self, protocol: usize, data: &[u8]) -> Result<()>;
-}
-
-pub struct TcpClient<T> {
+pub struct Client<T> {
     pub addr: &'static str,
-    pub closed: Arc<Mutex<bool>>,
+    pub closed: bool,
     pub conn: Option<Arc<Mutex<TcpStream>>>,
-    pub router: Arc<T>,
+    pub retries_times: u8,
+    pub router: T,
 }
 
-const MAX_BUFF_SIZE: usize = 8192;
-
-impl<T> TcpClient<T>
+impl<T> Client<T>
     where
-        T: ReadWrite + Send + Sync,
-        T: Debug + 'static,
+        T: InitRouter + Send + Sync + 'static,
 {
-    fn is_valid_addr(addr: &str) -> Result<()> {
-        if let Ok(_) = addr.parse::<Ipv4Addr>() {
-            return Ok(());
-        }
-
-        if let Ok(_) = addr.parse::<Ipv6Addr>() {
-            return Ok(());
-        }
-
-        return Err(Error::new(ErrorKind::Other, "not addr "));
+    pub fn new(addr: &str, mut core: Box<T>) -> Result<Self> {
+        Ok(Self {
+            addr: addr,
+            closed: true,
+            conn: None,
+            retries_times: 3,
+            router: core,
+        })
     }
 
-    pub async fn connect(&mut self, addr: &'static str) -> Result<()> {
-        if let Err(_) = Self::is_valid_addr(addr) {
-            return Ok(());
+    pub fn is_valid_ipv4(ip: &str) -> Result<bool> {
+        Ok(Regex::new(r"^(\d{1,3}\.){3}\d{1,3}$")?.is_match(ip))
+    }
+
+    pub fn is_valid_ipv6(ip: &str) -> Result<bool> {
+        Ok(Regex::new(r"^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$")?.is_match(ip))
+    }
+
+    pub async fn connect(&mut self) -> Result<()> {
+        if !Self::is_valid_ipv4(self.addr) || !Self::is_valid_ipv6(self.addr) {
+            return Err(Error::from(format!("[{}]不是一个有效的IP地址", self.addr)));
         }
 
-        let mut closed = self.closed.lock().await;
-        *closed = true;
-        drop(closed); // 释放锁
-
-        let conn = timeout(Duration::from_secs(5), TcpStream::connect(addr)).await??;
+        self.closed = true;
+        let conn = timeout(Duration::from_secs(15), TcpStream::connect(self.addr)).await??;
         self.conn = Some(Arc::new(Mutex::new(conn)));
-        let mut closed = self.closed.lock().await;
-        *closed = false;
+        self.closed = false;
 
         Ok(())
     }
 
-    pub async fn new(addr: &'static str, router: T) -> Result<Self> {
-        let mut tcp_client = TcpClient {
-            addr: addr,
-            closed: Arc::new(Default::default()),
-            conn: None,
-            router: Arc::new(router),
-        };
+    pub fn handle_conn(&mut self) -> Result<()> {
+        if self.closed || self.conn.is_none() {
+            return Ok(());
+        }
 
-        tcp_client.connect(addr).await?;
+        let mut reader = Reader::new_reader(EnumRouter::Client);
 
-        Ok(tcp_client)
+        loop {
+            if let Err(e) = reader.read(self.conn.clone()) {
+                return Err(Error::from(e.to_string()));
+            }
+        }
     }
 
     async fn read(&mut self) -> Result<()> {
@@ -103,8 +79,8 @@ impl<T> TcpClient<T>
             &self.addr
         );
 
-        let h_len = core.header_len();
-        let p_len = core.protocol_len();
+        let h_len = core.header_len() as usize;
+        let p_len = core.protocol_len() as usize;
         let conn = self.conn.clone().unwrap();
         tokio::spawn(async move {
             let mut conn = conn.lock().await;
@@ -124,18 +100,16 @@ impl<T> TcpClient<T>
                 if body_len == 0 && buff.len() >= h_len {
                     hd_buff.copy_from_slice(&buff[..h_len]);
                     protocol = match p_len {
-                        2 => u16::from_be_bytes(hd_buff.clone().try_into().unwrap()) as usize,
-                        4 => u32::from_be_bytes(hd_buff.clone().try_into().unwrap()) as usize,
                         8 => u64::from_be_bytes(hd_buff.clone().try_into().unwrap()) as usize,
-                        _ => 2usize,
+                        4 => u32::from_be_bytes(hd_buff.clone().try_into().unwrap()) as usize,
+                        2 | _ => u16::from_be_bytes(hd_buff.clone().try_into().unwrap()) as usize,
                     };
 
                     let others = &buff[h_len - p_len..h_len];
                     body_len = match h_len - p_len {
-                        2 => u16::from_be_bytes(others.try_into().unwrap()) as usize,
-                        4 => u32::from_be_bytes(others.try_into().unwrap()) as usize,
                         8 => u64::from_be_bytes(others.try_into().unwrap()) as usize,
-                        _ => 2usize,
+                        4 => u32::from_be_bytes(others.try_into().unwrap()) as usize,
+                        2 | _ => u16::from_be_bytes(others.try_into().unwrap()) as usize,
                     };
 
                     // 清除已读的头部内容
@@ -144,7 +118,7 @@ impl<T> TcpClient<T>
                 }
 
                 if buff_len >= body_len {
-                    core.callback((protocol, buff[..body_len].to_owned()));
+                    core.callback((protocol as u32, buff[..body_len].to_owned()));
 
                     buff.copy_within((buff_len - body_len)..buff_len, 0);
                     buff_len -= body_len;
@@ -165,15 +139,14 @@ impl<T> TcpClient<T>
             }
         }
 
-        let h_len = self.router.header_len();
-        let p_len = self.router.protocol_len();
+        let h_len = self.router.header_len() as usize;
         let mut buffer = Vec::with_capacity(h_len + data.len());
-        match p_len {
+        match self.router.protocol_len() as usize {
             8 => buffer.write_u64(protocol as u64).await?,
             4 => buffer.write_u32(protocol as u32).await?,
             2 | _ => buffer.write_u16(protocol as u16).await?,
         }
-        match h_len - p_len {
+        match h_len - (self.router.protocol_len() as usize) {
             8 => buffer.write_u64(data.len() as u64).await?,
             4 => buffer.write_u32(data.len() as u32).await?,
             2 | _ => buffer.write_u16(data.len() as u16).await?,
@@ -184,8 +157,4 @@ impl<T> TcpClient<T>
         let mut conn_lock = conn.lock().await;
         Ok(conn_lock.write_all(&buffer[..]).await?)
     }
-}
-
-fn main() {
-    println!("callback success...");
 }
