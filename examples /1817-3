@@ -1,109 +1,120 @@
 use std::collections::HashMap;
-use serde::__private::de::IdentifierDeserializer;
+use std::io::{Error, Result};
+use std::sync::{Arc, Mutex};
 
-use crate::{CallbackBack, ReadWrite};
+use tokio::net::TcpStream;
 
-#[derive(Debug)]
-pub struct User {
-    pub id: u64,
-    pub name: String,
-    pub age: u8,
+use crate::manager::{client::Client, server::Server};
+
+const MAX_BUFF_SIZE: usize = 8192;
+
+pub trait InitRouter<T = (u32, Vec<u8>)> {
+    fn name(&self) -> &str;
+    fn init(&mut self);
+    fn header_len(&self) -> u8;
+    fn protocol_len(&self) -> u8;
+    fn callback(&self, args: T);
 }
 
-impl User {
-    pub fn new(id: u64, name: &str, age: u8) -> Self {
-        Self {
-            id,
-            name: name.to_owned(),
-            age,
-        }
-    }
+pub trait TcpClients: InitRouter {
+    fn name(&self) -> &str;
+    fn add_client(&mut self, ip_addr: &str, conn: TcpStream);
+    fn serviceable(&self, ip_addr: &str, port: u16);
+    fn get_client_ips(&self) -> Vec<&str>;
+    fn delete_client(&mut self, ip_addr: &str);
+    fn center_forwarding(&self, ip_addr: &str, protocol: u32, data: &[u8]) -> Result<()>;
 }
 
-#[derive(Debug)]
-pub struct Table;
-
-impl Table {
-    pub fn new() -> Self {
-        Table
-    }
+struct Manager<S, C> {
+    clients: HashMap<&'static str, Arc<Client<C>>>,
+    servers: HashMap<&'static str, Arc<Server<S>>>,
 }
 
-pub enum WsRsFn<T = Vec<u8>, U = T> where T: From<U> {
-    Func1(Box<dyn Fn(U)>),
-    Func2(Box<dyn Fn(Box<User>, T)>),
-    Func3(Box<dyn Fn(Box<User>, Box<Table>, T)>),
-    Func4(Box<dyn Fn(Box<User>, T, Box<dyn Fn(u32, Vec<u8>)>)>),
-}
-
-pub struct WsRouter {
-    actions: HashMap<u32, WsRsFn>,
-}
-
-impl WsRouter {
-    pub fn new() -> Self {
-        WsRouter {
-            actions: HashMap::new(),
-        }
-    }
-}
-
-impl CallbackBack<(u64, u32, Vec<u8>)> for WsRouter {
-    type CallbackType = WsRsFn;
-
-    fn name(&self) -> &str {
-        "ws-router"
-    }
-
-    fn init(&mut self) {
-        self.actions.insert(1000, WsRsFn::Func1(Box::new(demo001)));
-        self.actions.insert(1001, WsRsFn::Func2(Box::new(demo002)));
-        self.actions.insert(1002, WsRsFn::Func3(Box::new(demo003)));
-        self.actions.insert(1003, WsRsFn::Func4(Box::new(demo004)));
-    }
-
-    fn callback(&self, args: (u64, u32, Vec<u8>)) {
-        if let Some(function) = self.actions.get(&args.1) {
-            let user = Box::new(User::new(args.0, "test1", 27));
-            match function {
-                WsRsFn::Func1(func) => func(args.2.into()),
-                WsRsFn::Func2(func) => func(user, args.2.into()),
-                WsRsFn::Func3(func) => func(user, Box::new(Table::new()), args.2.into()),
-                WsRsFn::Func4(func) => func(user, args.2.into(), Box::new(|id: u32, data: Vec<u8>| {}))
+impl<S, C> Manager<S, C>
+    where C: InitRouter + Send + Sync + 'static,
+          S: TcpClients + Send + Sync + 'static {
+    fn add_client(&mut self, mut clients: HashMap<&str, Box<C>>) -> Result<()> {
+        for (ip_addr, router) in clients.iter_mut() {
+            if ip_addr.trim_matches(' ') == "" {
+                return Err(Error::from("IP地址必须填写"));
             }
 
-            return;
+            if self.clients.contains_key(ip_addr) {
+                return Err(Error::from(format!("[{}] 名称已存在", router.name())));
+            }
+            router.init();
+            let client_conn = Client::new(ip_addr, router.clone())?;
+
+            self.clients.insert(ip_addr, Arc::new(client_conn));
         }
 
-        eprintln!("{} 协议号不存在: ({})", self.name(), args.0);
+        self.loop_read()
     }
-}
 
-impl ReadWrite<(u64, u32, Vec<u8>)> for WsRouter {
-    fn read(&mut self) -> std::io::Result<()> {
+    fn add_server(&mut self, servers: HashMap<&str, Box<dyn InitRouter>>) -> Result<()> {
+        for (ip_addr, router) in servers.iter() {}
+
+        Ok(())
+    }
+
+    fn get_manager() -> Self {
+        Manager
+    }
+
+    fn get_client(name: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn get_server() -> Result<()> {
+        Ok(())
+    }
+
+
+    fn loop_read(&mut self) -> Result<()> {
+        for (ip_addr, client) in self.clients.iter_mut() {
+            let mut client = client.clone();
+            tokio::spawn(async move {});
+        }
+
+        self.heartbeat()
+    }
+
+    fn heartbeat(&self) -> Result<()> {
         todo!()
     }
 
-    fn write(&self, protocol: usize, data: &[u8]) -> std::io::Result<()> {
+    fn client_closed(&mut self) {
+        todo!()
+    }
+
+    fn server_closed(&mut self) {
         todo!()
     }
 }
 
-
-#[derive(Debug)]
-pub struct ReqUser {
-    pub id: u32,
-    pub name: String,
-    pub age: u8,
-    pub hobby: Vec<String>,
+pub enum EnumRouter {
+    Client,
+    Server,
 }
 
-fn demo001(data: ReqUser) { println!("req: {:?}", data); }
+pub struct Reader {
+    srv: EnumRouter,
+    buff: Vec<u8>,
+    start: usize,
+    end: usize,
+    max_buff_size: usize,
+}
 
-fn demo002(user: Box<User>, data: Vec<u8>) { todo!() }
+impl Reader {
+    pub fn new_reader(reader: EnumRouter) -> Self {
+        todo!()
+    }
 
-fn demo003(user: Box<User>, table: Box<Table>, data: Vec<u8>) { todo!() }
+    pub fn read(&mut self, conn: Option<Arc<Mutex<TcpStream>>>) -> Result<()> {
+        todo!()
+    }
 
-fn demo004(user: Box<User>, data: Vec<u8>, func: Box<dyn Fn(u32, Vec<u8>)>) {
-    func(user.id as u32, data)
+    pub fn process_data(&mut self) -> Result<()> {
+        todo!()
+    }
 }
