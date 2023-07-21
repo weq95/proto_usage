@@ -1,51 +1,131 @@
-use std::collections::HashMap;
+use std::io::Result;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::{Arc, Mutex};
 
-use crate::CallbackBack;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    net::TcpStream,
+    time::Duration,
+};
 
-pub struct TcpRouter {
-    pub actions: HashMap<u32, TcpRsFn>,
+use crate::manager::mgr::{EnumRouter, InitRouter, Reader, TcpClients};
+
+pub struct Server<T: TcpClients + Send + Sync + 'static> {
+    addr: &'static str,
+    listener: TcpListener,
+    clients: Arc<Mutex<T>>,
 }
 
-impl TcpRouter {
-    fn new() -> Self { TcpRouter { actions: HashMap::new() } }
-}
-
-pub enum TcpRsFn<T = Vec<u8>> {
-    Func1(Box<dyn Fn(T)>),
-    Func2(Box<dyn Fn(u32, T)>),
-    Func3(Box<dyn Fn(u32, T, Box<dyn Fn(u32, Vec<u8>)>)>),
-}
-
-impl CallbackBack<(usize, Vec<u8>)> for TcpRouter {
-    type CallbackType = TcpRsFn;
-
-    fn name(&self) -> &str {
-        "tcp-router"
+#[axum::async_trait]
+impl<T> Server<T>
+    where
+        T: TcpClients + Send + Sync + 'static,
+{
+    fn new(addr: &str, core: Box<dyn TcpClients>) -> Result<Self> {
+        let listener = TcpListener::bind(addr)?;
+        Ok(Server {
+            addr,
+            listener,
+            clients: Arc::new(Mutex::new(core)),
+        })
     }
 
-    fn init(&mut self) {
-        self.actions.insert(1000, TcpRsFn::Func1(Box::new(demo001)));
-        self.actions.insert(1001, TcpRsFn::Func2(Box::new(demo002)));
-        self.actions.insert(1002, TcpRsFn::Func3(Box::new(demo003)));
+    // 检测IPv4地址是否为全局地址
+    fn is_global_ipv4(ip: &Ipv4Addr) -> bool {
+        let octets = ip.octets();
+        !((octets[0] == 10)
+            || (octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31))
+            || (octets[0] == 192 && octets[1] == 168)
+            || (octets[0] == 127))
     }
 
-    fn callback(&self, args: (usize, Vec<u8>)) {
-        if let Some(function) = self.actions.get(&(args.0 as u32)) {
-            match function {
-                TcpRsFn::Func1(func) => func(args.1.into()),
-                TcpRsFn::Func2(func) => func(args.0 as u32, args.1.into()),
-                TcpRsFn::Func3(func) => func(args.0 as u32, args.1.into(), Box::new(|id: u32, data: Vec<u8>| {}))
+    // 检测IPv6地址是否为全局地址
+    fn is_global_ipv6(ip: &Ipv6Addr) -> bool {
+        let segments = ip.segments();
+        !(segments[0] & 0xE000 == 0x2000) // 以2000::/3开头
+    }
+
+    fn tcp_accept(&mut self) {
+        tokio::spawn(async move {
+            for (mut client, ip_core) in self.listener.accept().await {
+                tokio::spawn(async move {
+                    let is_local_ip = match ip_core {
+                        IpAddr::V4(ip_v4) => Self::is_global_ipv4(&ip_v4),
+                        IpAddr::V6(ip_v6) => Self::is_global_ipv6(&ip_v6),
+                    };
+
+                    let mut ip_addr = ip_core.ip().to_string();
+                    if is_local_ip {
+                        // 获取公网IP
+                        use reqwest::Client;
+                        #[derive(Debug, Serialize, Deserialize)]
+                        struct PublicIP {
+                            pub origin: String,
+                        }
+                        match Client::new()
+                            .get("https://httpbin.org/ip")
+                            .timeout(Duration::from_secs(15))
+                            .send()
+                            .await
+                        {
+                            Err(e) => {
+                                eprintln!(format!(
+                                    "{} 公网IP获取错误, 程序退出中...",
+                                    e.to_string()
+                                ));
+                                std::process::exit(1);
+                            }
+                            Ok(response) => match response.json::<PublicIP>().await {
+                                Ok(result) => {
+                                    ip_addr = result.origin;
+                                }
+                                Err(e) => {
+                                    eprintln!(format!(
+                                        "{} 解析公网IP错误, 程序退出中...",
+                                        e.to_string()
+                                    ));
+                                    std::process::exit(1);
+                                }
+                            },
+                        }
+                    }
+
+                    // 开启监听
+                    Reader::new_reader(EnumRouter::Server).read(client.borrow());
+
+                    let clients = self.clients.lock().unwrap();
+                    (*clients).add_client(&ip_addr, client);
+                    drop(clients);
+
+                    // 获取该客户端的服务端口
+                    let _ = self.write(1001, ip_addr.into_bytes(), &mut client.borrow());
+                });
             }
+        });
+    }
 
-            return;
+    async fn write(&self, protocol: u32, data: Vec<u8>, conn: &mut TcpStream) -> Result<()> {
+        let client = self.clients.lock().unwrap();
+        let h_len = client.header_len() as usize;
+        let mut buffer = Vec::with_capacity(h_len + data.len());
+
+        match client.protocol_len() as usize {
+            8 => buffer.write_u64(protocol as u64).await.unwrap(),
+            4 => buffer.write_u32(protocol as u32).await.unwrap(),
+            2 | _ => buffer.write_u16(protocol as u16).await.unwrap(),
         }
 
-        eprintln!("{} 协议号不存在: ({})", self.name(), args.0);
+        match h_len - (client.protocol_len() as usize) {
+            8 => buffer.write_u64(data.len() as u64).await.unwrap(),
+            4 => buffer.write_u32(data.len() as u32).await.unwrap(),
+            2 | _ => buffer.write_u16(data.len() as u16).await.unwrap(),
+        }
+        drop(client);
+        buffer.extend_from_slice(&data[..]);
+
+        conn.write_all(&buffer[..]).await
     }
 }
-
-pub fn demo001(data: Vec<u8>) { todo!() }
-
-pub fn demo002(id: u32, data: Vec<u8>) { todo!() }
-
-pub fn demo003(id: u32, data: Vec<u8>, func: Box<dyn Fn(u32, Vec<u8>)>) { todo!() }
